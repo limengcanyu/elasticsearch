@@ -98,7 +98,10 @@ public class XContentMapValues {
     }
 
     public static Object extractValue(String path, Map<?, ?> map) {
-        String[] pathElements = path.split("\\.");
+        return extractValue(map, path.split("\\."));
+    }
+
+    public static Object extractValue(Map<?, ?> map, String... pathElements) {
         if (pathElements.length == 0) {
             return null;
         }
@@ -264,7 +267,7 @@ public class XContentMapValues {
 
                 List<Object> filteredValue = filter((Iterable<?>) value,
                         subIncludeAutomaton, subIncludeState, excludeAutomaton, excludeState, matchAllAutomaton);
-                if (filteredValue.isEmpty() == false) {
+                if (includeAutomaton.isAccept(includeState) || filteredValue.isEmpty() == false) {
                     filtered.put(key, filteredValue);
                 }
 

@@ -36,7 +36,6 @@ import org.elasticsearch.common.xcontent.XContentFactory;
 import org.elasticsearch.common.xcontent.XContentType;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -48,7 +47,6 @@ import static org.elasticsearch.common.settings.Settings.Builder.EMPTY_SETTINGS;
 import static org.elasticsearch.common.settings.Settings.readSettingsFromStream;
 import static org.elasticsearch.common.settings.Settings.writeSettingsToStream;
 import static org.elasticsearch.common.xcontent.support.XContentMapValues.nodeBooleanValue;
-import static org.elasticsearch.snapshots.SnapshotInfo.METADATA_FIELD_INTRODUCED;
 
 /**
  * Create snapshot request
@@ -110,9 +108,7 @@ public class CreateSnapshotRequest extends MasterNodeRequest<CreateSnapshotReque
         includeGlobalState = in.readBoolean();
         waitForCompletion = in.readBoolean();
         partial = in.readBoolean();
-        if (in.getVersion().onOrAfter(METADATA_FIELD_INTRODUCED)) {
-            userMetadata = in.readMap();
-        }
+        userMetadata = in.readMap();
     }
 
     @Override
@@ -126,9 +122,7 @@ public class CreateSnapshotRequest extends MasterNodeRequest<CreateSnapshotReque
         out.writeBoolean(includeGlobalState);
         out.writeBoolean(waitForCompletion);
         out.writeBoolean(partial);
-        if (out.getVersion().onOrAfter(METADATA_FIELD_INTRODUCED)) {
-            out.writeMap(userMetadata);
-        }
+        out.writeMap(userMetadata);
     }
 
     @Override
@@ -164,7 +158,7 @@ public class CreateSnapshotRequest extends MasterNodeRequest<CreateSnapshotReque
         return validationException;
     }
 
-    private static int metadataSize(Map<String, Object> userMetadata) {
+    public static int metadataSize(Map<String, Object> userMetadata) {
         if (userMetadata == null) {
             return 0;
         }
@@ -431,8 +425,8 @@ public class CreateSnapshotRequest extends MasterNodeRequest<CreateSnapshotReque
             if (name.equals("indices")) {
                 if (entry.getValue() instanceof String) {
                     indices(Strings.splitStringByCommaToArray((String) entry.getValue()));
-                } else if (entry.getValue() instanceof ArrayList) {
-                    indices((ArrayList<String>) entry.getValue());
+                } else if (entry.getValue() instanceof List) {
+                    indices((List<String>) entry.getValue());
                 } else {
                     throw new IllegalArgumentException("malformed indices section, should be an array of strings");
                 }
@@ -481,11 +475,6 @@ public class CreateSnapshotRequest extends MasterNodeRequest<CreateSnapshotReque
         builder.field("metadata", userMetadata);
         builder.endObject();
         return builder;
-    }
-
-    @Override
-    public void readFrom(StreamInput in) throws IOException {
-        throw new UnsupportedOperationException("usage of Streamable is to be replaced by Writeable");
     }
 
     @Override

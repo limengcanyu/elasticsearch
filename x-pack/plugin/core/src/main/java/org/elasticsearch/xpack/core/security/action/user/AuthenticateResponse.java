@@ -16,7 +16,10 @@ public class AuthenticateResponse extends ActionResponse {
 
     private Authentication authentication;
 
-    public AuthenticateResponse() {}
+    public AuthenticateResponse(StreamInput in) throws IOException {
+        super(in);
+        authentication = new Authentication(in);
+    }
 
     public AuthenticateResponse(Authentication authentication){
         this.authentication = authentication;
@@ -29,12 +32,6 @@ public class AuthenticateResponse extends ActionResponse {
     @Override
     public void writeTo(StreamOutput out) throws IOException {
         authentication.writeTo(out);
-    }
-
-    @Override
-    public void readFrom(StreamInput in) throws IOException {
-        super.readFrom(in);
-        authentication = new Authentication(in);
     }
 
 }

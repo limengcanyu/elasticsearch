@@ -19,8 +19,11 @@
 
 package org.elasticsearch.action.bulk;
 
+import org.elasticsearch.action.DocWriteRequest;
+import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.support.replication.ReplicatedWriteRequest;
 import org.elasticsearch.action.support.replication.ReplicationRequest;
+import org.elasticsearch.action.update.UpdateRequest;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.index.shard.ShardId;
@@ -38,7 +41,7 @@ public class BulkShardRequest extends ReplicatedWriteRequest<BulkShardRequest> {
         items = new BulkItemRequest[in.readVInt()];
         for (int i = 0; i < items.length; i++) {
             if (in.readBoolean()) {
-                items[i] = BulkItemRequest.readBulkItem(in);
+                items[i] = new BulkItemRequest(in);
             }
         }
     }
@@ -47,6 +50,24 @@ public class BulkShardRequest extends ReplicatedWriteRequest<BulkShardRequest> {
         super(shardId);
         this.items = items;
         setRefreshPolicy(refreshPolicy);
+    }
+
+    public long totalSizeInBytes() {
+        long totalSizeInBytes = 0;
+        for (int i = 0; i < items.length; i++) {
+            DocWriteRequest<?> request = items[i].request();
+            if (request instanceof IndexRequest) {
+                if (((IndexRequest) request).source() != null) {
+                    totalSizeInBytes += ((IndexRequest) request).source().length();
+                }
+            } else if (request instanceof UpdateRequest) {
+                IndexRequest doc = ((UpdateRequest) request).doc();
+                if (doc != null && doc.source() != null) {
+                    totalSizeInBytes += ((UpdateRequest) request).doc().source().length();
+                }
+            }
+        }
+        return totalSizeInBytes;
     }
 
     public BulkItemRequest[] items() {
@@ -85,11 +106,6 @@ public class BulkShardRequest extends ReplicatedWriteRequest<BulkShardRequest> {
     }
 
     @Override
-    public void readFrom(StreamInput in) {
-        throw new UnsupportedOperationException("usage of Streamable is to be replaced by Writeable");
-    }
-
-    @Override
     public String toString() {
         // This is included in error messages so we'll try to make it somewhat user friendly.
         StringBuilder b = new StringBuilder("BulkShardRequest [");
@@ -121,6 +137,11 @@ public class BulkShardRequest extends ReplicatedWriteRequest<BulkShardRequest> {
             stringBuilder.append(", refresh[").append(refreshPolicy).append(']');
         }
         return stringBuilder.toString();
+    }
+
+    @Override
+    protected BulkShardRequest routedBasedOnClusterVersion(long routedBasedOnClusterVersion) {
+        return super.routedBasedOnClusterVersion(routedBasedOnClusterVersion);
     }
 
     @Override

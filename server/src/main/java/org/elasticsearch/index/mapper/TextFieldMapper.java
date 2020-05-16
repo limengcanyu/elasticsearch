@@ -26,12 +26,14 @@ import org.apache.lucene.analysis.TokenFilter;
 import org.apache.lucene.analysis.TokenStream;
 import org.apache.lucene.analysis.ngram.EdgeNGramTokenFilter;
 import org.apache.lucene.analysis.shingle.FixedShingleFilter;
+import org.apache.lucene.analysis.tokenattributes.BytesTermAttribute;
 import org.apache.lucene.analysis.tokenattributes.PositionIncrementAttribute;
 import org.apache.lucene.analysis.tokenattributes.TermToBytesRefAttribute;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.index.IndexOptions;
-import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.index.Term;
+import org.apache.lucene.queries.intervals.Intervals;
+import org.apache.lucene.queries.intervals.IntervalsSource;
 import org.apache.lucene.search.AutomatonQuery;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanQuery;
@@ -44,8 +46,6 @@ import org.apache.lucene.search.PrefixQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.SynonymQuery;
 import org.apache.lucene.search.TermQuery;
-import org.apache.lucene.search.intervals.Intervals;
-import org.apache.lucene.search.intervals.IntervalsSource;
 import org.apache.lucene.search.spans.FieldMaskingSpanQuery;
 import org.apache.lucene.search.spans.SpanMultiTermQueryWrapper;
 import org.apache.lucene.search.spans.SpanNearQuery;
@@ -68,6 +68,8 @@ import org.elasticsearch.index.fielddata.IndexFieldData;
 import org.elasticsearch.index.fielddata.plain.PagedBytesIndexFieldData;
 import org.elasticsearch.index.query.IntervalBuilder;
 import org.elasticsearch.index.query.QueryShardContext;
+import org.elasticsearch.search.aggregations.support.CoreValuesSourceType;
+import org.elasticsearch.search.aggregations.support.ValuesSourceType;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -108,7 +110,7 @@ public class TextFieldMapper extends FieldMapper {
         public static final int POSITION_INCREMENT_GAP = 100;
     }
 
-    public static class Builder extends FieldMapper.Builder<Builder, TextFieldMapper> {
+    public static class Builder extends FieldMapper.Builder<Builder> {
 
         private int positionIncrementGap = POSITION_INCREMENT_GAP_USE_ANALYZER;
         private int minPrefixChars = -1;
@@ -421,13 +423,13 @@ public class TextFieldMapper extends FieldMapper {
 
         public IntervalsSource intervals(BytesRef term) {
             if (term.length > maxChars) {
-                return Intervals.prefix(term.utf8ToString());
+                return Intervals.prefix(term);
             }
             if (term.length >= minChars) {
                 return Intervals.fixField(name(), Intervals.term(term));
             }
             String wildcardTerm = term.utf8ToString() + "?".repeat(Math.max(0, minChars - term.length));
-            return Intervals.or(Intervals.fixField(name(), Intervals.wildcard(wildcardTerm)), Intervals.term(term));
+            return Intervals.or(Intervals.fixField(name(), Intervals.wildcard(new BytesRef(wildcardTerm))), Intervals.term(term));
         }
 
         @Override
@@ -473,7 +475,7 @@ public class TextFieldMapper extends FieldMapper {
         }
 
         @Override
-        protected void parseCreateField(ParseContext context, List<IndexableField> fields) throws IOException {
+        protected void parseCreateField(ParseContext context) throws IOException {
             throw new UnsupportedOperationException();
         }
 
@@ -489,12 +491,12 @@ public class TextFieldMapper extends FieldMapper {
             super(fieldType.name(), fieldType, fieldType, indexSettings, MultiFields.empty(), CopyTo.empty());
         }
 
-        void addField(String value, List<IndexableField> fields) {
-            fields.add(new Field(fieldType().name(), value, fieldType()));
+        void addField(ParseContext context, String value) {
+            context.doc().add(new Field(fieldType().name(), value, fieldType()));
         }
 
         @Override
-        protected void parseCreateField(ParseContext context, List<IndexableField> fields) {
+        protected void parseCreateField(ParseContext context) {
             throw new UnsupportedOperationException();
         }
 
@@ -509,7 +511,7 @@ public class TextFieldMapper extends FieldMapper {
         }
     }
 
-    public static final class TextFieldType extends StringFieldType {
+    public static class TextFieldType extends StringFieldType {
 
         private boolean fielddata;
         private double fielddataMinFrequency;
@@ -671,7 +673,7 @@ public class TextFieldMapper extends FieldMapper {
                 if (prefixFieldType != null) {
                     return prefixFieldType.intervals(normalizedTerm);
                 }
-                return Intervals.prefix(normalizedTerm.utf8ToString()); // TODO make Intervals.prefix() take a BytesRef
+                return Intervals.prefix(normalizedTerm);
             }
             IntervalBuilder builder = new IntervalBuilder(name(), analyzer == null ? searchAnalyzer() : analyzer);
             return builder.analyzeText(text, maxGaps, ordered);
@@ -680,7 +682,10 @@ public class TextFieldMapper extends FieldMapper {
         @Override
         public Query phraseQuery(TokenStream stream, int slop, boolean enablePosIncrements) throws IOException {
             String field = name();
-            if (indexPhrases && slop == 0 && hasGaps(stream) == false) {
+            // we can't use the index_phrases shortcut with slop, if there are gaps in the stream,
+            // or if the incoming token stream is the output of a token graph due to
+            // https://issues.apache.org/jira/browse/LUCENE-8916
+            if (indexPhrases && slop == 0 && hasGaps(stream) == false && stream.hasAttribute(BytesTermAttribute.class) == false) {
                 stream = new FixedShingleFilter(stream, 2);
                 field = field + FAST_PHRASE_SUFFIX;
             }
@@ -693,6 +698,9 @@ public class TextFieldMapper extends FieldMapper {
 
             stream.reset();
             while (stream.incrementToken()) {
+                if (termAtt.getBytesRef() == null) {
+                    throw new IllegalStateException("Null term while building phrase query");
+                }
                 if (enablePosIncrements) {
                     position += posIncrAtt.getPositionIncrement();
                 }
@@ -741,11 +749,17 @@ public class TextFieldMapper extends FieldMapper {
         @Override
         public IndexFieldData.Builder fielddataBuilder(String fullyQualifiedIndexName) {
             if (fielddata == false) {
-                throw new IllegalArgumentException("Fielddata is disabled on text fields by default. Set fielddata=true on [" + name()
-                        + "] in order to load fielddata in memory by uninverting the inverted index. Note that this can however "
-                                + "use significant memory. Alternatively use a keyword field instead.");
+                throw new IllegalArgumentException("Text fields are not optimised for operations that require per-document "
+                    + "field data like aggregations and sorting, so these operations are disabled by default. Please use a "
+                    + "keyword field instead. Alternatively, set fielddata=true on [" + name() + "] in order to load "
+                    + "field data by uninverting the inverted index. Note that this can use significant memory.");
             }
             return new PagedBytesIndexFieldData.Builder(fielddataMinFrequency, fielddataMaxFrequency, fielddataMinSegmentSize);
+        }
+
+        @Override
+        public ValuesSourceType getValuesSourceType() {
+            return CoreValuesSourceType.BYTES;
         }
 
         @Override
@@ -799,7 +813,7 @@ public class TextFieldMapper extends FieldMapper {
     }
 
     @Override
-    protected void parseCreateField(ParseContext context, List<IndexableField> fields) throws IOException {
+    protected void parseCreateField(ParseContext context) throws IOException {
         final String value;
         if (context.externalValueSet()) {
             value = context.externalValue().toString();
@@ -813,15 +827,15 @@ public class TextFieldMapper extends FieldMapper {
 
         if (fieldType().indexOptions() != IndexOptions.NONE || fieldType().stored()) {
             Field field = new Field(fieldType().name(), value, fieldType());
-            fields.add(field);
+            context.doc().add(field);
             if (fieldType().omitNorms()) {
-                createFieldNamesField(context, fields);
+                createFieldNamesField(context);
             }
             if (prefixFieldMapper != null) {
-                prefixFieldMapper.addField(value, fields);
+                prefixFieldMapper.addField(context, value);
             }
             if (phraseFieldMapper != null) {
-                fields.add(new Field(phraseFieldMapper.fieldType.name(), value, phraseFieldMapper.fieldType));
+                context.doc().add(new Field(phraseFieldMapper.fieldType.name(), value, phraseFieldMapper.fieldType));
             }
         }
     }

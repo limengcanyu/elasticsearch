@@ -54,7 +54,7 @@ public class PutPipelineTransportAction extends TransportMasterNodeAction<PutPip
         IngestService ingestService, NodeClient client) {
         super(
             PutPipelineAction.NAME, transportService, ingestService.getClusterService(),
-            threadPool, actionFilters, indexNameExpressionResolver, PutPipelineRequest::new
+            threadPool, actionFilters, PutPipelineRequest::new, indexNameExpressionResolver
         );
         this.client = client;
         this.ingestService = ingestService;
@@ -71,20 +71,15 @@ public class PutPipelineTransportAction extends TransportMasterNodeAction<PutPip
     }
 
     @Override
-    protected AcknowledgedResponse newResponse() {
-        throw new UnsupportedOperationException("usage of Streamable is to be replaced by Writeable");
-    }
-
-    @Override
     protected void masterOperation(Task task, PutPipelineRequest request, ClusterState state, ActionListener<AcknowledgedResponse> listener)
             throws Exception {
         NodesInfoRequest nodesInfoRequest = new NodesInfoRequest();
-        nodesInfoRequest.clear();
-        nodesInfoRequest.ingest(true);
+        nodesInfoRequest.clear()
+            .addMetric(NodesInfoRequest.Metric.INGEST.metricName());
         client.admin().cluster().nodesInfo(nodesInfoRequest, ActionListener.wrap(nodeInfos -> {
             Map<DiscoveryNode, IngestInfo> ingestInfos = new HashMap<>();
             for (NodeInfo nodeInfo : nodeInfos.getNodes()) {
-                ingestInfos.put(nodeInfo.getNode(), nodeInfo.getIngest());
+                ingestInfos.put(nodeInfo.getNode(), nodeInfo.getInfo(IngestInfo.class));
             }
             ingestService.putPipeline(ingestInfos, request, listener);
         }, listener::onFailure));

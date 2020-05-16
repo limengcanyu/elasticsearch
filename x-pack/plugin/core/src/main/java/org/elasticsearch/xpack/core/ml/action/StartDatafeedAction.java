@@ -7,17 +7,17 @@ package org.elasticsearch.xpack.core.ml.action;
 
 import org.elasticsearch.ElasticsearchParseException;
 import org.elasticsearch.Version;
-import org.elasticsearch.action.ActionType;
 import org.elasticsearch.action.ActionRequestBuilder;
 import org.elasticsearch.action.ActionRequestValidationException;
+import org.elasticsearch.action.ActionType;
 import org.elasticsearch.action.ValidateActions;
-import org.elasticsearch.action.support.master.AcknowledgedResponse;
+import org.elasticsearch.action.search.SearchRequest;
+import org.elasticsearch.action.support.IndicesOptions;
 import org.elasticsearch.action.support.master.MasterNodeRequest;
 import org.elasticsearch.client.ElasticsearchClient;
 import org.elasticsearch.common.ParseField;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
-import org.elasticsearch.common.io.stream.Writeable;
 import org.elasticsearch.common.time.DateMathParser;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.common.xcontent.ObjectParser;
@@ -26,7 +26,7 @@ import org.elasticsearch.common.xcontent.ToXContentObject;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.index.mapper.DateFieldMapper;
-import org.elasticsearch.xpack.core.XPackPlugin;
+import org.elasticsearch.persistent.PersistentTaskParams;
 import org.elasticsearch.xpack.core.ml.MlTasks;
 import org.elasticsearch.xpack.core.ml.datafeed.DatafeedConfig;
 import org.elasticsearch.xpack.core.ml.job.config.Job;
@@ -39,7 +39,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.function.LongSupplier;
 
-public class StartDatafeedAction extends ActionType<AcknowledgedResponse> {
+public class StartDatafeedAction extends ActionType<NodeAcknowledgedResponse> {
 
     public static final ParseField START_TIME = new ParseField("start");
     public static final ParseField END_TIME = new ParseField("end");
@@ -49,12 +49,7 @@ public class StartDatafeedAction extends ActionType<AcknowledgedResponse> {
     public static final String NAME = "cluster:admin/xpack/ml/datafeed/start";
 
     private StartDatafeedAction() {
-        super(NAME);
-    }
-
-    @Override
-    public Writeable.Reader<AcknowledgedResponse> getResponseReader() {
-        return AcknowledgedResponse::new;
+        super(NAME, NodeAcknowledgedResponse::new);
     }
 
     public static class Request extends MasterNodeRequest<Request> implements ToXContentObject {
@@ -86,7 +81,8 @@ public class StartDatafeedAction extends ActionType<AcknowledgedResponse> {
         }
 
         public Request(StreamInput in) throws IOException {
-            readFrom(in);
+            super(in);
+            params = new DatafeedParams(in);
         }
 
         public Request() {
@@ -105,12 +101,6 @@ public class StartDatafeedAction extends ActionType<AcknowledgedResponse> {
                         + " [" + params.endTime + "]", e);
             }
             return e;
-        }
-
-        @Override
-        public void readFrom(StreamInput in) throws IOException {
-            super.readFrom(in);
-            params = new DatafeedParams(in);
         }
 
         @Override
@@ -143,11 +133,15 @@ public class StartDatafeedAction extends ActionType<AcknowledgedResponse> {
         }
     }
 
-    public static class DatafeedParams implements XPackPlugin.XPackPersistentTaskParams {
+    public static class DatafeedParams implements PersistentTaskParams {
 
         public static final ParseField INDICES = new ParseField("indices");
 
-        public static ObjectParser<DatafeedParams, Void> PARSER = new ObjectParser<>(MlTasks.DATAFEED_TASK_NAME, true, DatafeedParams::new);
+        public static final ObjectParser<DatafeedParams, Void> PARSER = new ObjectParser<>(
+            MlTasks.DATAFEED_TASK_NAME,
+            true,
+            DatafeedParams::new
+        );
         static {
             PARSER.declareString((params, datafeedId) -> params.datafeedId = datafeedId, DatafeedConfig.ID);
             PARSER.declareString((params, startTime) -> params.startTime = parseDateOrThrow(
@@ -157,6 +151,9 @@ public class StartDatafeedAction extends ActionType<AcknowledgedResponse> {
                     params.setTimeout(TimeValue.parseTimeValue(val, TIMEOUT.getPreferredName())), TIMEOUT);
             PARSER.declareString(DatafeedParams::setJobId, Job.ID);
             PARSER.declareStringArray(DatafeedParams::setDatafeedIndices, INDICES);
+            PARSER.declareObject(DatafeedParams::setIndicesOptions,
+                (p, c) -> IndicesOptions.fromMap(p.map(), SearchRequest.DEFAULT_INDICES_OPTIONS),
+                DatafeedConfig.INDICES_OPTIONS);
         }
 
         static long parseDateOrThrow(String date, ParseField paramName, LongSupplier now) {
@@ -198,6 +195,11 @@ public class StartDatafeedAction extends ActionType<AcknowledgedResponse> {
             timeout = TimeValue.timeValueMillis(in.readVLong());
             jobId = in.readOptionalString();
             datafeedIndices = in.readStringList();
+            if (in.getVersion().onOrAfter(Version.V_7_7_0)) {
+                indicesOptions = IndicesOptions.readIndicesOptions(in);
+            } else {
+                indicesOptions = SearchRequest.DEFAULT_INDICES_OPTIONS;
+            }
         }
 
         DatafeedParams() {
@@ -209,6 +211,7 @@ public class StartDatafeedAction extends ActionType<AcknowledgedResponse> {
         private TimeValue timeout = TimeValue.timeValueSeconds(20);
         private List<String> datafeedIndices = Collections.emptyList();
         private String jobId;
+        private IndicesOptions indicesOptions = SearchRequest.DEFAULT_INDICES_OPTIONS;
 
 
         public String getDatafeedId() {
@@ -255,6 +258,15 @@ public class StartDatafeedAction extends ActionType<AcknowledgedResponse> {
             this.datafeedIndices = datafeedIndices;
         }
 
+        public IndicesOptions getIndicesOptions() {
+            return indicesOptions;
+        }
+
+        public DatafeedParams setIndicesOptions(IndicesOptions indicesOptions) {
+            this.indicesOptions = ExceptionsHelper.requireNonNull(indicesOptions, DatafeedConfig.INDICES_OPTIONS);
+            return this;
+        }
+
         @Override
         public String getWriteableName() {
             return MlTasks.DATAFEED_TASK_NAME;
@@ -273,6 +285,9 @@ public class StartDatafeedAction extends ActionType<AcknowledgedResponse> {
             out.writeVLong(timeout.millis());
             out.writeOptionalString(jobId);
             out.writeStringCollection(datafeedIndices);
+            if (out.getVersion().onOrAfter(Version.V_7_7_0)) {
+                indicesOptions.writeIndicesOptions(out);
+            }
         }
 
         @Override
@@ -290,13 +305,18 @@ public class StartDatafeedAction extends ActionType<AcknowledgedResponse> {
             if (datafeedIndices.isEmpty() == false) {
                 builder.field(INDICES.getPreferredName(), datafeedIndices);
             }
+
+            builder.startObject(DatafeedConfig.INDICES_OPTIONS.getPreferredName());
+            indicesOptions.toXContent(builder, params);
+            builder.endObject();
+
             builder.endObject();
             return builder;
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(datafeedId, startTime, endTime, timeout, jobId, datafeedIndices);
+            return Objects.hash(datafeedId, startTime, endTime, timeout, jobId, datafeedIndices, indicesOptions);
         }
 
         @Override
@@ -313,11 +333,12 @@ public class StartDatafeedAction extends ActionType<AcknowledgedResponse> {
                     Objects.equals(endTime, other.endTime) &&
                     Objects.equals(timeout, other.timeout) &&
                     Objects.equals(jobId, other.jobId) &&
+                    Objects.equals(indicesOptions, other.indicesOptions) &&
                     Objects.equals(datafeedIndices, other.datafeedIndices);
         }
     }
 
-    static class RequestBuilder extends ActionRequestBuilder<Request, AcknowledgedResponse> {
+    static class RequestBuilder extends ActionRequestBuilder<Request, NodeAcknowledgedResponse> {
 
         RequestBuilder(ElasticsearchClient client, StartDatafeedAction action) {
             super(client, action, new Request());

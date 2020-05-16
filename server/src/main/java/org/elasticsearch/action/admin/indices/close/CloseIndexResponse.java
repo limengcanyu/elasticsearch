@@ -27,6 +27,7 @@ import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
+import org.elasticsearch.common.util.CollectionUtils;
 import org.elasticsearch.common.xcontent.ToXContentFragment;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.index.Index;
@@ -203,7 +204,7 @@ public class CloseIndexResponse extends ShardsAcknowledgedResponse {
         }
 
         public boolean hasFailures() {
-            return failures != null && failures.length > 0;
+            return CollectionUtils.isEmpty(failures) == false;
         }
 
         public int getId() {
@@ -238,7 +239,9 @@ public class CloseIndexResponse extends ShardsAcknowledgedResponse {
 
             private @Nullable String nodeId;
 
-            private Failure() {
+            private Failure(StreamInput in) throws IOException {
+                super(in);
+                nodeId = in.readOptionalString();
             }
 
             public Failure(final String index, final int shardId, final Throwable reason) {
@@ -252,12 +255,6 @@ public class CloseIndexResponse extends ShardsAcknowledgedResponse {
 
             public String getNodeId() {
                 return nodeId;
-            }
-
-            @Override
-            public void readFrom(final StreamInput in) throws IOException {
-                super.readFrom(in);
-                nodeId = in.readOptionalString();
             }
 
             @Override
@@ -280,9 +277,7 @@ public class CloseIndexResponse extends ShardsAcknowledgedResponse {
             }
 
             static Failure readFailure(final StreamInput in) throws IOException {
-                final Failure failure = new Failure();
-                failure.readFrom(in);
-                return failure;
+                return new Failure(in);
             }
         }
     }

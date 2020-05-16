@@ -20,6 +20,8 @@
 package org.elasticsearch.client;
 
 import org.elasticsearch.ElasticsearchException;
+import org.elasticsearch.action.admin.cluster.repositories.cleanup.CleanupRepositoryRequest;
+import org.elasticsearch.action.admin.cluster.repositories.cleanup.CleanupRepositoryResponse;
 import org.elasticsearch.action.admin.cluster.repositories.delete.DeleteRepositoryRequest;
 import org.elasticsearch.action.admin.cluster.repositories.get.GetRepositoriesRequest;
 import org.elasticsearch.action.admin.cluster.repositories.get.GetRepositoriesResponse;
@@ -133,7 +135,18 @@ public class SnapshotIT extends ESRestHighLevelClientTestCase {
         assertThat(response.getNodes().size(), equalTo(1));
     }
 
-    public void testCreateSnapshot() throws IOException {
+    public void testCleanupRepository() throws IOException {
+        AcknowledgedResponse putRepositoryResponse = createTestRepository("test", FsRepository.TYPE, "{\"location\": \".\"}");
+        assertTrue(putRepositoryResponse.isAcknowledged());
+
+        CleanupRepositoryRequest request = new CleanupRepositoryRequest("test");
+        CleanupRepositoryResponse response = execute(request, highLevelClient().snapshot()::cleanupRepository,
+            highLevelClient().snapshot()::cleanupRepositoryAsync);
+        assertThat(response.result().bytes(), equalTo(0L));
+        assertThat(response.result().blobs(), equalTo(0L));
+    }
+
+    public void testCreateSnapshot() throws Exception {
         String repository = "test_repository";
         assertTrue(createTestRepository(repository, FsRepository.TYPE, "{\"location\": \".\"}").isAcknowledged());
 

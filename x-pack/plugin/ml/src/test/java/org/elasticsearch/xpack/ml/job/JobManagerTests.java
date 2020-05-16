@@ -15,8 +15,8 @@ import org.elasticsearch.client.Client;
 import org.elasticsearch.cluster.AckedClusterStateUpdateTask;
 import org.elasticsearch.cluster.ClusterName;
 import org.elasticsearch.cluster.ClusterState;
-import org.elasticsearch.cluster.metadata.IndexMetaData;
-import org.elasticsearch.cluster.metadata.MetaData;
+import org.elasticsearch.cluster.metadata.IndexMetadata;
+import org.elasticsearch.cluster.metadata.Metadata;
 import org.elasticsearch.cluster.routing.IndexRoutingTable;
 import org.elasticsearch.cluster.routing.IndexShardRoutingTable;
 import org.elasticsearch.cluster.routing.RecoverySource;
@@ -37,7 +37,7 @@ import org.elasticsearch.env.TestEnvironment;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.index.analysis.AnalysisRegistry;
 import org.elasticsearch.index.shard.ShardId;
-import org.elasticsearch.persistent.PersistentTasksCustomMetaData;
+import org.elasticsearch.persistent.PersistentTasksCustomMetadata;
 import org.elasticsearch.search.SearchModule;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.threadpool.ThreadPool;
@@ -62,7 +62,7 @@ import org.elasticsearch.xpack.ml.job.persistence.JobResultsPersister;
 import org.elasticsearch.xpack.ml.job.persistence.JobResultsProvider;
 import org.elasticsearch.xpack.ml.job.persistence.MockClientBuilder;
 import org.elasticsearch.xpack.ml.job.process.autodetect.UpdateParams;
-import org.elasticsearch.xpack.ml.notifications.Auditor;
+import org.elasticsearch.xpack.ml.notifications.AnomalyDetectionAuditor;
 import org.junit.Before;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Matchers;
@@ -105,7 +105,7 @@ public class JobManagerTests extends ESTestCase {
     private ThreadPool threadPool;
     private JobResultsProvider jobResultsProvider;
     private JobResultsPersister jobResultsPersister;
-    private Auditor auditor;
+    private AnomalyDetectionAuditor auditor;
     private UpdateJobProcessNotifier updateJobProcessNotifier;
 
     @Override
@@ -126,7 +126,7 @@ public class JobManagerTests extends ESTestCase {
 
         jobResultsProvider = mock(JobResultsProvider.class);
         jobResultsPersister = mock(JobResultsPersister.class);
-        auditor = mock(Auditor.class);
+        auditor = mock(AnomalyDetectionAuditor.class);
         updateJobProcessNotifier = mock(UpdateJobProcessNotifier.class);
 
         ExecutorService executorService = mock(ExecutorService.class);
@@ -142,7 +142,7 @@ public class JobManagerTests extends ESTestCase {
         MlMetadata.Builder mlMetadata = new MlMetadata.Builder();
 
         ClusterState clusterState = ClusterState.builder(new ClusterName("_name"))
-                .metaData(MetaData.builder()
+                .metadata(Metadata.builder()
                         .putCustom(MlMetadata.TYPE, mlMetadata.build()))
                 .build();
         when(clusterService.state()).thenReturn(clusterState);
@@ -173,7 +173,7 @@ public class JobManagerTests extends ESTestCase {
         mlMetadata.putJob(clusterJob, false);
 
         ClusterState clusterState = ClusterState.builder(new ClusterName("_name"))
-                .metaData(MetaData.builder()
+                .metadata(Metadata.builder()
                         .putCustom(MlMetadata.TYPE, mlMetadata.build()))
                 .build();
         when(clusterService.state()).thenReturn(clusterState);
@@ -207,7 +207,7 @@ public class JobManagerTests extends ESTestCase {
         mlMetadata.putJob(csJobBar, false);
 
         ClusterState clusterState = ClusterState.builder(new ClusterName("_name"))
-                .metaData(MetaData.builder()
+                .metadata(Metadata.builder()
                         .putCustom(MlMetadata.TYPE, mlMetadata.build()))
                 .build();
         when(clusterService.state()).thenReturn(clusterState);
@@ -295,7 +295,7 @@ public class JobManagerTests extends ESTestCase {
         MlMetadata.Builder mlMetadata = new MlMetadata.Builder();
         mlMetadata.putJob(buildJobBuilder("foo").build(), false);
         ClusterState clusterState = ClusterState.builder(new ClusterName("name"))
-                .metaData(MetaData.builder().putCustom(MlMetadata.TYPE, mlMetadata.build())).build();
+                .metadata(Metadata.builder().putCustom(MlMetadata.TYPE, mlMetadata.build())).build();
 
         jobManager.putJob(putJobRequest, analysisRegistry, clusterState, new ActionListener<PutJobAction.Response>() {
             @Override
@@ -323,6 +323,7 @@ public class JobManagerTests extends ESTestCase {
         Mockito.verifyNoMoreInteractions(auditor, updateJobProcessNotifier);
     }
 
+    @SuppressWarnings({"unchecked", "rawtypes"})
     public void testNotifyFilterChanged() throws IOException {
         Detector.Builder detectorReferencingFilter = new Detector.Builder("count", null);
         detectorReferencingFilter.setByFieldName("foo");
@@ -347,14 +348,14 @@ public class JobManagerTests extends ESTestCase {
 
         Job.Builder jobWithoutFilter = buildJobBuilder("job-without-filter");
 
-        PersistentTasksCustomMetaData.Builder tasksBuilder =  PersistentTasksCustomMetaData.builder();
+        PersistentTasksCustomMetadata.Builder tasksBuilder =  PersistentTasksCustomMetadata.builder();
         addJobTask(jobReferencingFilter1.getId(), "node_id", JobState.OPENED, tasksBuilder);
         addJobTask(jobReferencingFilter2.getId(), "node_id", JobState.OPENED, tasksBuilder);
         addJobTask(jobWithoutFilter.getId(), "node_id", JobState.OPENED, tasksBuilder);
 
         ClusterState clusterState = ClusterState.builder(new ClusterName("_name"))
-                .metaData(MetaData.builder()
-                        .putCustom(PersistentTasksCustomMetaData.TYPE, tasksBuilder.build()))
+                .metadata(Metadata.builder()
+                        .putCustom(PersistentTasksCustomMetadata.TYPE, tasksBuilder.build()))
                 .build();
         when(clusterService.state()).thenReturn(clusterState);
 
@@ -408,10 +409,10 @@ public class JobManagerTests extends ESTestCase {
 
         List<BytesReference> docsAsBytes = Collections.singletonList(toBytesReference(jobReferencingFilter.build()));
 
-        PersistentTasksCustomMetaData.Builder tasksBuilder = PersistentTasksCustomMetaData.builder();
+        PersistentTasksCustomMetadata.Builder tasksBuilder = PersistentTasksCustomMetadata.builder();
         ClusterState clusterState = ClusterState.builder(new ClusterName("_name"))
-                .metaData(MetaData.builder()
-                        .putCustom(PersistentTasksCustomMetaData.TYPE, tasksBuilder.build()))
+                .metadata(Metadata.builder()
+                        .putCustom(PersistentTasksCustomMetadata.TYPE, tasksBuilder.build()))
                 .build();
         when(clusterService.state()).thenReturn(clusterState);
 
@@ -443,10 +444,10 @@ public class JobManagerTests extends ESTestCase {
         jobReferencingFilter.setAnalysisConfig(filterAnalysisConfig);
         List<BytesReference> docsAsBytes = Collections.singletonList(toBytesReference(jobReferencingFilter.build()));
 
-        PersistentTasksCustomMetaData.Builder tasksBuilder = PersistentTasksCustomMetaData.builder();
+        PersistentTasksCustomMetadata.Builder tasksBuilder = PersistentTasksCustomMetadata.builder();
         ClusterState clusterState = ClusterState.builder(new ClusterName("_name"))
-                .metaData(MetaData.builder()
-                        .putCustom(PersistentTasksCustomMetaData.TYPE, tasksBuilder.build()))
+                .metadata(Metadata.builder()
+                        .putCustom(PersistentTasksCustomMetadata.TYPE, tasksBuilder.build()))
                 .build();
         when(clusterService.state()).thenReturn(clusterState);
         when(clusterService.state()).thenReturn(clusterState);
@@ -470,16 +471,16 @@ public class JobManagerTests extends ESTestCase {
     public void testUpdateJob_notAllowedPreMigration() {
         MlMetadata.Builder mlmetadata = new MlMetadata.Builder().putJob(buildJobBuilder("closed-job-not-migrated").build(), false);
 
-        MetaData.Builder metaData = MetaData.builder();
+        Metadata.Builder metadata = Metadata.builder();
         RoutingTable.Builder routingTable = RoutingTable.builder();
 
-        IndexMetaData.Builder indexMetaData = IndexMetaData.builder(AnomalyDetectorsIndex.configIndexName());
-        indexMetaData.settings(Settings.builder()
-                .put(IndexMetaData.SETTING_VERSION_CREATED, Version.CURRENT)
-                .put(IndexMetaData.SETTING_NUMBER_OF_SHARDS, 1)
-                .put(IndexMetaData.SETTING_NUMBER_OF_REPLICAS, 0)
+        IndexMetadata.Builder indexMetadata = IndexMetadata.builder(AnomalyDetectorsIndex.configIndexName());
+        indexMetadata.settings(Settings.builder()
+                .put(IndexMetadata.SETTING_VERSION_CREATED, Version.CURRENT)
+                .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1)
+                .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0)
         );
-        metaData.put(indexMetaData);
+        metadata.put(indexMetadata);
         Index index = new Index(AnomalyDetectorsIndex.configIndexName(), "_uuid");
         ShardId shardId = new ShardId(index, 0);
         ShardRouting shardRouting = ShardRouting.newUnassigned(shardId, true, RecoverySource.EmptyStoreRecoverySource.INSTANCE,
@@ -490,7 +491,7 @@ public class JobManagerTests extends ESTestCase {
                 .addIndexShard(new IndexShardRoutingTable.Builder(shardId).addShard(shardRouting).build()));
 
         ClusterState clusterState = ClusterState.builder(new ClusterName("_name"))
-                .metaData(metaData.putCustom(MlMetadata.TYPE, mlmetadata.build()))
+                .metadata(metadata.putCustom(MlMetadata.TYPE, mlmetadata.build()))
                 .routingTable(routingTable.build())
                 .build();
         when(clusterService.state()).thenReturn(clusterState);
@@ -506,14 +507,14 @@ public class JobManagerTests extends ESTestCase {
     }
 
     public void testUpdateProcessOnCalendarChanged() {
-        PersistentTasksCustomMetaData.Builder tasksBuilder =  PersistentTasksCustomMetaData.builder();
+        PersistentTasksCustomMetadata.Builder tasksBuilder =  PersistentTasksCustomMetadata.builder();
         addJobTask("job-1", "node_id", JobState.OPENED, tasksBuilder);
         addJobTask("job-2", "node_id", JobState.OPENED, tasksBuilder);
         addJobTask("job-3", "node_id", JobState.OPENED, tasksBuilder);
 
         ClusterState clusterState = ClusterState.builder(new ClusterName("_name"))
-                .metaData(MetaData.builder()
-                        .putCustom(PersistentTasksCustomMetaData.TYPE, tasksBuilder.build()))
+                .metadata(Metadata.builder()
+                        .putCustom(PersistentTasksCustomMetadata.TYPE, tasksBuilder.build()))
                 .build();
         when(clusterService.state()).thenReturn(clusterState);
 
@@ -531,7 +532,7 @@ public class JobManagerTests extends ESTestCase {
                 ));
 
         ArgumentCaptor<UpdateParams> updateParamsCaptor = ArgumentCaptor.forClass(UpdateParams.class);
-        verify(updateJobProcessNotifier, times(2)).submitJobUpdate(updateParamsCaptor.capture(), any(ActionListener.class));
+        verify(updateJobProcessNotifier, times(2)).submitJobUpdate(updateParamsCaptor.capture(), any());
 
         List<UpdateParams> capturedUpdateParams = updateParamsCaptor.getAllValues();
         assertThat(capturedUpdateParams.size(), equalTo(2));
@@ -542,14 +543,14 @@ public class JobManagerTests extends ESTestCase {
     }
 
     public void testUpdateProcessOnCalendarChanged_GivenGroups() throws IOException {
-        PersistentTasksCustomMetaData.Builder tasksBuilder =  PersistentTasksCustomMetaData.builder();
+        PersistentTasksCustomMetadata.Builder tasksBuilder =  PersistentTasksCustomMetadata.builder();
         addJobTask("job-1", "node_id", JobState.OPENED, tasksBuilder);
         addJobTask("job-2", "node_id", JobState.OPENED, tasksBuilder);
         addJobTask("job-3", "node_id", JobState.OPENED, tasksBuilder);
 
         ClusterState clusterState = ClusterState.builder(new ClusterName("_name"))
-                .metaData(MetaData.builder()
-                        .putCustom(PersistentTasksCustomMetaData.TYPE, tasksBuilder.build()))
+                .metadata(Metadata.builder()
+                        .putCustom(PersistentTasksCustomMetadata.TYPE, tasksBuilder.build()))
                 .build();
         when(clusterService.state()).thenReturn(clusterState);
 
@@ -573,7 +574,7 @@ public class JobManagerTests extends ESTestCase {
                 ));
 
         ArgumentCaptor<UpdateParams> updateParamsCaptor = ArgumentCaptor.forClass(UpdateParams.class);
-        verify(updateJobProcessNotifier, times(2)).submitJobUpdate(updateParamsCaptor.capture(), any(ActionListener.class));
+        verify(updateJobProcessNotifier, times(2)).submitJobUpdate(updateParamsCaptor.capture(), any());
 
         List<UpdateParams> capturedUpdateParams = updateParamsCaptor.getAllValues();
         assertThat(capturedUpdateParams.size(), equalTo(2));
@@ -611,7 +612,7 @@ public class JobManagerTests extends ESTestCase {
 
     private ClusterState createClusterState() {
         ClusterState.Builder builder = ClusterState.builder(new ClusterName("_name"));
-        builder.metaData(MetaData.builder());
+        builder.metadata(Metadata.builder());
         return builder.build();
     }
 

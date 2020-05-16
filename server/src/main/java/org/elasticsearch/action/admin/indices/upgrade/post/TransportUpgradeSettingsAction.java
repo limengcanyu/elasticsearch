@@ -19,6 +19,8 @@
 
 package org.elasticsearch.action.admin.indices.upgrade.post;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.support.ActionFilters;
@@ -29,7 +31,7 @@ import org.elasticsearch.cluster.ack.ClusterStateUpdateResponse;
 import org.elasticsearch.cluster.block.ClusterBlockException;
 import org.elasticsearch.cluster.block.ClusterBlockLevel;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
-import org.elasticsearch.cluster.metadata.MetaDataUpdateSettingsService;
+import org.elasticsearch.cluster.metadata.MetadataUpdateSettingsService;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.io.stream.StreamInput;
@@ -41,14 +43,16 @@ import java.io.IOException;
 
 public class TransportUpgradeSettingsAction extends TransportMasterNodeAction<UpgradeSettingsRequest, AcknowledgedResponse> {
 
-    private final MetaDataUpdateSettingsService updateSettingsService;
+    private static final Logger logger = LogManager.getLogger(TransportUpgradeSettingsAction.class);
+
+    private final MetadataUpdateSettingsService updateSettingsService;
 
     @Inject
     public TransportUpgradeSettingsAction(TransportService transportService, ClusterService clusterService,
-                                          ThreadPool threadPool, MetaDataUpdateSettingsService updateSettingsService,
+                                          ThreadPool threadPool, MetadataUpdateSettingsService updateSettingsService,
                                           IndexNameExpressionResolver indexNameExpressionResolver, ActionFilters actionFilters) {
         super(UpgradeSettingsAction.NAME, transportService, clusterService, threadPool, actionFilters,
-            indexNameExpressionResolver, UpgradeSettingsRequest::new);
+            UpgradeSettingsRequest::new, indexNameExpressionResolver);
         this.updateSettingsService = updateSettingsService;
     }
 
@@ -66,11 +70,6 @@ public class TransportUpgradeSettingsAction extends TransportMasterNodeAction<Up
     @Override
     protected AcknowledgedResponse read(StreamInput in) throws IOException {
         return new AcknowledgedResponse(in);
-    }
-
-    @Override
-    protected AcknowledgedResponse newResponse() {
-        throw new UnsupportedOperationException("usage of Streamable is to be replaced by Writeable");
     }
 
     @Override

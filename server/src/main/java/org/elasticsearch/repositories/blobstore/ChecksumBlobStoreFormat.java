@@ -22,12 +22,15 @@ import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.index.CorruptIndexException;
 import org.apache.lucene.index.IndexFormatTooNewException;
 import org.apache.lucene.index.IndexFormatTooOldException;
+import org.apache.lucene.store.ByteBuffersDataInput;
+import org.apache.lucene.store.ByteBuffersIndexInput;
+import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.OutputStreamIndexOutput;
-import org.elasticsearch.cluster.metadata.MetaData;
+import org.apache.lucene.util.BytesRef;
+import org.elasticsearch.cluster.metadata.Metadata;
 import org.elasticsearch.common.CheckedConsumer;
 import org.elasticsearch.common.CheckedFunction;
 import org.elasticsearch.common.blobstore.BlobContainer;
-import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.compress.CompressorFactory;
 import org.elasticsearch.common.io.Streams;
@@ -46,10 +49,10 @@ import org.elasticsearch.common.xcontent.XContentType;
 import org.elasticsearch.gateway.CorruptStateException;
 import org.elasticsearch.snapshots.SnapshotInfo;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -65,21 +68,17 @@ public final class ChecksumBlobStoreFormat<T extends ToXContent> {
     static {
         Map<String, String> snapshotOnlyParams = new HashMap<>();
         // when metadata is serialized certain elements of the metadata shouldn't be included into snapshot
-        // exclusion of these elements is done by setting MetaData.CONTEXT_MODE_PARAM to MetaData.CONTEXT_MODE_SNAPSHOT
-        snapshotOnlyParams.put(MetaData.CONTEXT_MODE_PARAM, MetaData.CONTEXT_MODE_SNAPSHOT);
+        // exclusion of these elements is done by setting Metadata.CONTEXT_MODE_PARAM to Metadata.CONTEXT_MODE_SNAPSHOT
+        snapshotOnlyParams.put(Metadata.CONTEXT_MODE_PARAM, Metadata.CONTEXT_MODE_SNAPSHOT);
         // serialize SnapshotInfo using the SNAPSHOT mode
         snapshotOnlyParams.put(SnapshotInfo.CONTEXT_MODE_PARAM, SnapshotInfo.CONTEXT_MODE_SNAPSHOT);
         SNAPSHOT_ONLY_FORMAT_PARAMS = new ToXContent.MapParams(snapshotOnlyParams);
     }
 
-    private static final XContentType DEFAULT_X_CONTENT_TYPE = XContentType.SMILE;
-
     // The format version
     public static final int VERSION = 1;
 
     private static final int BUFFER_SIZE = 4096;
-
-    private final XContentType xContentType;
 
     private final boolean compress;
 
@@ -96,27 +95,14 @@ public final class ChecksumBlobStoreFormat<T extends ToXContent> {
      * @param blobNameFormat format of the blobname in {@link String#format} format
      * @param reader         prototype object that can deserialize T from XContent
      * @param compress       true if the content should be compressed
-     * @param xContentType   content type that should be used for write operations
-     */
-    public ChecksumBlobStoreFormat(String codec, String blobNameFormat, CheckedFunction<XContentParser, T, IOException> reader,
-                                   NamedXContentRegistry namedXContentRegistry, boolean compress, XContentType xContentType) {
-        this.reader = reader;
-        this.blobNameFormat = blobNameFormat;
-        this.namedXContentRegistry = namedXContentRegistry;
-        this.xContentType = xContentType;
-        this.compress = compress;
-        this.codec = codec;
-    }
-
-    /**
-     * @param codec          codec name
-     * @param blobNameFormat format of the blobname in {@link String#format} format
-     * @param reader         prototype object that can deserialize T from XContent
-     * @param compress       true if the content should be compressed
      */
     public ChecksumBlobStoreFormat(String codec, String blobNameFormat, CheckedFunction<XContentParser, T, IOException> reader,
                                    NamedXContentRegistry namedXContentRegistry, boolean compress) {
-        this(codec, blobNameFormat, reader, namedXContentRegistry, compress, DEFAULT_X_CONTENT_TYPE);
+        this.reader = reader;
+        this.blobNameFormat = blobNameFormat;
+        this.namedXContentRegistry = namedXContentRegistry;
+        this.compress = compress;
+        this.codec = codec;
     }
 
     /**
@@ -129,13 +115,6 @@ public final class ChecksumBlobStoreFormat<T extends ToXContent> {
     public T read(BlobContainer blobContainer, String name) throws IOException {
         String blobName = blobName(name);
         return readBlob(blobContainer, blobName);
-    }
-
-    /**
-     * Deletes obj in the blob container
-     */
-    public void delete(BlobContainer blobContainer, String name) throws IOException {
-        blobContainer.deleteBlob(blobName(name));
     }
 
     public String blobName(String name) {
@@ -151,14 +130,16 @@ public final class ChecksumBlobStoreFormat<T extends ToXContent> {
     public T readBlob(BlobContainer blobContainer, String blobName) throws IOException {
         final BytesReference bytes = Streams.readFully(blobContainer.readBlob(blobName));
         final String resourceDesc = "ChecksumBlobStoreFormat.readBlob(blob=\"" + blobName + "\")";
-        try (ByteArrayIndexInput indexInput =
-                 new ByteArrayIndexInput(resourceDesc, BytesReference.toBytes(bytes))) {
+        try {
+            final IndexInput indexInput = bytes.length() > 0 ? new ByteBuffersIndexInput(
+                    new ByteBuffersDataInput(Arrays.asList(BytesReference.toByteBuffers(bytes))), resourceDesc)
+                    : new ByteArrayIndexInput(resourceDesc, BytesRef.EMPTY_BYTES);
             CodecUtil.checksumEntireFile(indexInput);
             CodecUtil.checkHeader(indexInput, codec, VERSION, VERSION);
             long filePointer = indexInput.getFilePointer();
             long contentSize = indexInput.length() - CodecUtil.footerLength() - filePointer;
             try (XContentParser parser = XContentHelper.createParser(namedXContentRegistry, LoggingDeprecationHandler.INSTANCE,
-                bytes.slice((int) filePointer, (int) contentSize))) {
+                bytes.slice((int) filePointer, (int) contentSize), XContentType.SMILE)) {
                 return reader.apply(parser);
             }
         } catch (CorruptIndexException | IndexFormatTooOldException | IndexFormatTooNewException ex) {
@@ -192,32 +173,23 @@ public final class ChecksumBlobStoreFormat<T extends ToXContent> {
      * <p>
      * The blob will be compressed and checksum will be written if required.
      *
-     * @param obj           object to be serialized
-     * @param blobContainer blob container
-     * @param name          blob name
+     * @param obj                 object to be serialized
+     * @param blobContainer       blob container
+     * @param name                blob name
+     * @param failIfAlreadyExists Whether to fail if the blob already exists
      */
-    public void write(T obj, BlobContainer blobContainer, String name) throws IOException {
+    public void write(T obj, BlobContainer blobContainer, String name, boolean failIfAlreadyExists) throws IOException {
         final String blobName = blobName(name);
         writeTo(obj, blobName, bytesArray -> {
             try (InputStream stream = bytesArray.streamInput()) {
-                blobContainer.writeBlob(blobName, stream, bytesArray.length(), true);
+                blobContainer.writeBlob(blobName, stream, bytesArray.length(), failIfAlreadyExists);
             }
         });
     }
 
-    private void writeTo(final T obj, final String blobName, final CheckedConsumer<BytesArray, IOException> consumer) throws IOException {
-        final BytesReference bytes;
-        try (BytesStreamOutput bytesStreamOutput = new BytesStreamOutput()) {
-            if (compress) {
-                try (StreamOutput compressedStreamOutput = CompressorFactory.COMPRESSOR.streamOutput(bytesStreamOutput)) {
-                    write(obj, compressedStreamOutput);
-                }
-            } else {
-                write(obj, bytesStreamOutput);
-            }
-            bytes = bytesStreamOutput.bytes();
-        }
-        try (ByteArrayOutputStream outputStream = new ByteArrayOutputStream()) {
+    private void writeTo(final T obj, final String blobName,
+                         final CheckedConsumer<BytesReference, IOException> consumer) throws IOException {
+        try (BytesStreamOutput outputStream = new BytesStreamOutput()) {
             final String resourceDesc = "ChecksumBlobStoreFormat.writeBlob(blob=\"" + blobName + "\")";
             try (OutputStreamIndexOutput indexOutput = new OutputStreamIndexOutput(resourceDesc, blobName, outputStream, BUFFER_SIZE)) {
                 CodecUtil.writeHeader(indexOutput, codec, VERSION);
@@ -228,16 +200,22 @@ public final class ChecksumBlobStoreFormat<T extends ToXContent> {
                         // in order to write the footer we need to prevent closing the actual index input.
                     }
                 }) {
-                    bytes.writeTo(indexOutputOutputStream);
+                    if (compress) {
+                        try (StreamOutput compressedStreamOutput = CompressorFactory.COMPRESSOR.streamOutput(indexOutputOutputStream)) {
+                            write(obj, compressedStreamOutput);
+                        }
+                    } else {
+                        write(obj, indexOutputOutputStream);
+                    }
                 }
                 CodecUtil.writeFooter(indexOutput);
             }
-            consumer.accept(new BytesArray(outputStream.toByteArray()));
+            consumer.accept(outputStream.bytes());
         }
     }
 
-    private void write(T obj, StreamOutput streamOutput) throws IOException {
-        try (XContentBuilder builder = XContentFactory.contentBuilder(xContentType, streamOutput)) {
+    private void write(T obj, OutputStream streamOutput) throws IOException {
+        try (XContentBuilder builder = XContentFactory.contentBuilder(XContentType.SMILE, streamOutput)) {
             builder.startObject();
             obj.toXContent(builder, SNAPSHOT_ONLY_FORMAT_PARAMS);
             builder.endObject();

@@ -23,10 +23,10 @@ import org.elasticsearch.ElasticsearchParseException;
 import org.elasticsearch.common.xcontent.ToXContent;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentParser;
-import org.elasticsearch.geo.geometry.Geometry;
-import org.elasticsearch.geo.utils.GeographyValidator;
-import org.elasticsearch.geo.utils.GeometryValidator;
-import org.elasticsearch.geo.utils.WellKnownText;
+import org.elasticsearch.geometry.Geometry;
+import org.elasticsearch.geometry.utils.StandardValidator;
+import org.elasticsearch.geometry.utils.GeometryValidator;
+import org.elasticsearch.geometry.utils.WellKnownText;
 
 import java.io.IOException;
 import java.text.ParseException;
@@ -38,10 +38,9 @@ public final class GeometryParser {
 
     private final GeoJson geoJsonParser;
     private final WellKnownText wellKnownTextParser;
-    private final GeometryValidator validator;
 
     public GeometryParser(boolean rightOrientation, boolean coerce, boolean ignoreZValue) {
-        validator = new GeographyValidator(ignoreZValue);
+        GeometryValidator validator = new StandardValidator(ignoreZValue);
         geoJsonParser = new GeoJson(rightOrientation, coerce, validator);
         wellKnownTextParser = new WellKnownText(coerce, validator);
     }
@@ -56,9 +55,9 @@ public final class GeometryParser {
     /**
      * Returns a geometry format object that can parse and then serialize the object back to the same format.
      */
-    public GeometryFormat geometryFormat(XContentParser parser) {
+    public GeometryFormat<Geometry> geometryFormat(XContentParser parser) {
         if (parser.currentToken() == XContentParser.Token.VALUE_NULL) {
-            return new GeometryFormat() {
+            return new GeometryFormat<Geometry>() {
                 @Override
                 public Geometry fromXContent(XContentParser parser) throws IOException {
                     return null;
@@ -75,7 +74,7 @@ public final class GeometryParser {
                 }
             };
         } else if (parser.currentToken() == XContentParser.Token.START_OBJECT) {
-            return new GeometryFormat() {
+            return new GeometryFormat<Geometry>() {
                 @Override
                 public Geometry fromXContent(XContentParser parser) throws IOException {
                     return geoJsonParser.fromXContent(parser);
@@ -91,7 +90,7 @@ public final class GeometryParser {
                 }
             };
         } else if (parser.currentToken() == XContentParser.Token.VALUE_STRING) {
-            return new GeometryFormat() {
+            return new GeometryFormat<Geometry>() {
                 @Override
                 public Geometry fromXContent(XContentParser parser) throws IOException, ParseException {
                     return wellKnownTextParser.fromWKT(parser.text());
