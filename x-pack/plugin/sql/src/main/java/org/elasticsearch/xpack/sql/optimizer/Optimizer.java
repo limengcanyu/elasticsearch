@@ -5,6 +5,8 @@
  */
 package org.elasticsearch.xpack.sql.optimizer;
 
+import org.elasticsearch.common.collect.Tuple;
+import org.elasticsearch.search.aggregations.metrics.PercentilesConfig;
 import org.elasticsearch.xpack.ql.expression.Alias;
 import org.elasticsearch.xpack.ql.expression.Attribute;
 import org.elasticsearch.xpack.ql.expression.AttributeMap;
@@ -40,6 +42,7 @@ import org.elasticsearch.xpack.ql.optimizer.OptimizerRules.OptimizerExpressionRu
 import org.elasticsearch.xpack.ql.optimizer.OptimizerRules.OptimizerRule;
 import org.elasticsearch.xpack.ql.optimizer.OptimizerRules.PropagateEquals;
 import org.elasticsearch.xpack.ql.optimizer.OptimizerRules.PruneLiteralsInOrderBy;
+import org.elasticsearch.xpack.ql.optimizer.OptimizerRules.ReplaceRegexMatch;
 import org.elasticsearch.xpack.ql.optimizer.OptimizerRules.SetAsOptimized;
 import org.elasticsearch.xpack.ql.optimizer.OptimizerRules.TransformDirection;
 import org.elasticsearch.xpack.ql.plan.logical.Aggregate;
@@ -66,7 +69,6 @@ import org.elasticsearch.xpack.sql.expression.function.aggregate.MatrixStats;
 import org.elasticsearch.xpack.sql.expression.function.aggregate.MatrixStatsEnclosed;
 import org.elasticsearch.xpack.sql.expression.function.aggregate.Max;
 import org.elasticsearch.xpack.sql.expression.function.aggregate.Min;
-import org.elasticsearch.xpack.sql.expression.function.aggregate.NumericAggregate;
 import org.elasticsearch.xpack.sql.expression.function.aggregate.Percentile;
 import org.elasticsearch.xpack.sql.expression.function.aggregate.PercentileRank;
 import org.elasticsearch.xpack.sql.expression.function.aggregate.PercentileRanks;
@@ -88,6 +90,7 @@ import org.elasticsearch.xpack.sql.plan.logical.SubQueryAlias;
 import org.elasticsearch.xpack.sql.session.EmptyExecutable;
 import org.elasticsearch.xpack.sql.session.SingletonExecutable;
 
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -117,8 +120,9 @@ public class Optimizer extends RuleExecutor<LogicalPlan> {
 
     @Override
     protected Iterable<RuleExecutor<LogicalPlan>.Batch> batches() {
-        Batch pivot = new Batch("Pivot Rewrite", Limiter.ONCE,
-                new RewritePivot());
+        Batch substitutions = new Batch("Substitutions", Limiter.ONCE,
+                new RewritePivot(),
+                new ReplaceRegexMatch());
 
         Batch refs = new Batch("Replace References", Limiter.ONCE,
                 new ReplaceReferenceAttributeWithSource(),
@@ -142,6 +146,7 @@ public class Optimizer extends RuleExecutor<LogicalPlan> {
                 // needs to occur before BinaryComparison combinations (see class)
                 new PropagateEquals(),
                 new CombineBinaryComparisons(),
+                new CombineDisjunctionsToIn(),
                 // prune/elimination
                 new PruneLiteralsInGroupBy(),
                 new PruneDuplicatesInGroupBy(),
@@ -172,7 +177,7 @@ public class Optimizer extends RuleExecutor<LogicalPlan> {
                 CleanAliases.INSTANCE,
                 new SetAsOptimized());
 
-        return Arrays.asList(pivot, refs, operators, aggregate, local, label);
+        return Arrays.asList(substitutions, refs, operators, aggregate, local, label);
     }
 
     static class RewritePivot extends OptimizerRule<Pivot> {
@@ -211,12 +216,12 @@ public class Optimizer extends RuleExecutor<LogicalPlan> {
             final Map<Attribute, Expression> collectRefs = new LinkedHashMap<>();
 
             // collect aliases
-            plan.forEachUp(p -> p.forEachExpressionsUp(e -> {
+            plan.forEachExpressionsUp(e -> {
                 if (e instanceof Alias) {
                     Alias a = (Alias) e;
                     collectRefs.put(a.toAttribute(), a.child());
                 }
-            }));
+            });
 
             plan = plan.transformUp(p -> {
                 // non attribute defining plans get their references removed
@@ -232,6 +237,14 @@ public class Optimizer extends RuleExecutor<LogicalPlan> {
             });
 
             return plan;
+        }
+    }
+
+    static class CombineDisjunctionsToIn extends org.elasticsearch.xpack.ql.optimizer.OptimizerRules.CombineDisjunctionsToIn {
+
+        @Override
+        protected In createIn(Expression key, List<Expression> values, ZoneId zoneId) {
+            return new In(key.source(), key, values, zoneId);
         }
     }
 
@@ -301,7 +314,7 @@ public class Optimizer extends RuleExecutor<LogicalPlan> {
                 OrderBy ob = (OrderBy) project.child();
 
                 // resolve function references (that maybe hiding the target)
-                final Map<Attribute, Function> collectRefs = new LinkedHashMap<>();
+                AttributeMap.Builder<Function> collectRefs = AttributeMap.builder();
 
                 // collect Attribute sources
                 // only Aliases are interesting since these are the only ones that hide expressions
@@ -315,7 +328,7 @@ public class Optimizer extends RuleExecutor<LogicalPlan> {
                     }
                 }));
 
-                AttributeMap<Function> functions = new AttributeMap<>(collectRefs);
+                AttributeMap<Function> functions = collectRefs.build();
 
                 // track the direct parents
                 Map<String, Order> nestedOrders = new LinkedHashMap<>();
@@ -540,14 +553,14 @@ public class Optimizer extends RuleExecutor<LogicalPlan> {
             //TODO: this need rewriting when moving functions of NamedExpression
 
             // collect aliases in the lower list
-            Map<Attribute, NamedExpression> map = new LinkedHashMap<>();
+            AttributeMap.Builder<NamedExpression> aliasesBuilder = AttributeMap.builder();
             for (NamedExpression ne : lower) {
                 if ((ne instanceof Attribute) == false) {
-                    map.put(ne.toAttribute(), ne);
+                    aliasesBuilder.put(ne.toAttribute(), ne);
                 }
             }
 
-            AttributeMap<NamedExpression> aliases = new AttributeMap<>(map);
+            AttributeMap<NamedExpression> aliases = aliasesBuilder.build();
             List<NamedExpression> replaced = new ArrayList<>();
 
             // replace any matching attribute with a lower alias (if there's a match)
@@ -784,14 +797,17 @@ public class Optimizer extends RuleExecutor<LogicalPlan> {
     /**
      * Any numeric aggregates (avg, min, max, sum) acting on literals are converted to an iif(count(1)=0, null, literal*count(1)) for sum,
      * and to iif(count(1)=0,null,literal) for the other three.
+     * Additionally count(DISTINCT literal) is converted to iif(count(1)=0, 0, 1).
      */
     private static class ReplaceAggregatesWithLiterals extends OptimizerRule<LogicalPlan> {
 
         @Override
         protected LogicalPlan rule(LogicalPlan p) {
             return p.transformExpressionsDown(e -> {
-                if (e instanceof Min || e instanceof Max || e instanceof Avg || e instanceof Sum) {
-                    NumericAggregate a = (NumericAggregate) e;
+                if (e instanceof Min || e instanceof Max || e instanceof Avg || e instanceof Sum ||
+                    (e instanceof Count && ((Count) e).distinct())) {
+
+                    AggregateFunction a = (AggregateFunction) e;
 
                     if (a.field().foldable()) {
                         Expression countOne = new Count(a.source(), new Literal(Source.EMPTY, 1, a.dataType()), false);
@@ -799,12 +815,16 @@ public class Optimizer extends RuleExecutor<LogicalPlan> {
                         Expression argument = a.field();
                         Literal foldedArgument = new Literal(argument.source(), argument.fold(), a.dataType());
 
+                        Expression iifResult = Literal.NULL;
                         Expression iifElseResult = foldedArgument;
                         if (e instanceof Sum) {
                             iifElseResult = new Mul(a.source(), countOne, foldedArgument);
+                        } else if (e instanceof Count) {
+                            iifResult =  new Literal(Source.EMPTY, 0, e.dataType());
+                            iifElseResult = new Literal(Source.EMPTY, 1, e.dataType());
                         }
 
-                        return new Iif(a.source(), countEqZero, Literal.NULL, iifElseResult);
+                        return new Iif(a.source(), countEqZero, iifResult, iifElseResult);
                     }
                 }
                 return e;
@@ -820,7 +840,7 @@ public class Optimizer extends RuleExecutor<LogicalPlan> {
         @Override
         protected LogicalPlan rule(Aggregate a) {
             boolean hasLocalRelation = a.anyMatch(LocalRelation.class::isInstance);
-            
+
             return hasLocalRelation ? a.transformExpressionsDown(c -> {
                 return c instanceof Count ? new Literal(c.source(), 1, c.dataType()) : c;
             }) : a;
@@ -998,39 +1018,50 @@ public class Optimizer extends RuleExecutor<LogicalPlan> {
         }
     }
 
+    private static class PercentileKey extends Tuple<Expression, PercentilesConfig> {
+        PercentileKey(Percentile per) {
+            super(per.field(), per.percentilesConfig());
+        }
+
+        PercentileKey(PercentileRank per) {
+            super(per.field(), per.percentilesConfig());
+        }
+        
+        private Expression field() {
+            return v1();
+        }
+        
+        private PercentilesConfig percentilesConfig() {
+            return v2();
+        }
+    }
+
     static class ReplaceAggsWithPercentiles extends OptimizerBasicRule {
 
         @Override
         public LogicalPlan apply(LogicalPlan p) {
-            // percentile per field/expression
-            Map<Expression, Set<Expression>> percentsPerField = new LinkedHashMap<>();
+            Map<PercentileKey, Set<Expression>> percentsPerAggKey = new LinkedHashMap<>();
 
-            // count gather the percents for each field
             p.forEachExpressionsUp(e -> {
                 if (e instanceof Percentile) {
                     Percentile per = (Percentile) e;
-                    Expression field = per.field();
-                    Set<Expression> percentiles = percentsPerField.get(field);
-
-                    if (percentiles == null) {
-                        percentiles = new LinkedHashSet<>();
-                        percentsPerField.put(field, percentiles);
-                    }
-
-                    percentiles.add(per.percent());
+                    percentsPerAggKey.computeIfAbsent(new PercentileKey(per), v -> new LinkedHashSet<>())
+                        .add(per.percent());
                 }
             });
 
-            Map<Expression, Percentiles> percentilesPerField = new LinkedHashMap<>();
-            // create a Percentile agg for each field (and its associated percents)
-            percentsPerField.forEach((k, v) -> {
-                percentilesPerField.put(k, new Percentiles(v.iterator().next().source(), k, new ArrayList<>(v)));
-            });
+            // create a Percentile agg for each agg key
+            Map<PercentileKey, Percentiles> percentilesPerAggKey = new LinkedHashMap<>();
+            percentsPerAggKey.forEach((aggKey, percents) -> percentilesPerAggKey.put(
+                    aggKey,
+                    new Percentiles(percents.iterator().next().source(), aggKey.field(), new ArrayList<>(percents), 
+                        aggKey.percentilesConfig())));
 
             return p.transformExpressionsUp(e -> {
                 if (e instanceof Percentile) {
                     Percentile per = (Percentile) e;
-                    Percentiles percentiles = percentilesPerField.get(per.field());
+                    PercentileKey a = new PercentileKey(per);
+                    Percentiles percentiles = percentilesPerAggKey.get(a);
                     return new InnerAggregate(per, percentiles);
                 }
 
@@ -1043,35 +1074,27 @@ public class Optimizer extends RuleExecutor<LogicalPlan> {
 
         @Override
         public LogicalPlan apply(LogicalPlan p) {
-            // percentile per field/expression
-            final Map<Expression, Set<Expression>> percentPerField = new LinkedHashMap<>();
+            final Map<PercentileKey, Set<Expression>> valuesPerAggKey = new LinkedHashMap<>();
 
-            // count gather the percents for each field
             p.forEachExpressionsUp(e -> {
                 if (e instanceof PercentileRank) {
                     PercentileRank per = (PercentileRank) e;
-                    Expression field = per.field();
-                    Set<Expression> percentiles = percentPerField.get(field);
-
-                    if (percentiles == null) {
-                        percentiles = new LinkedHashSet<>();
-                        percentPerField.put(field, percentiles);
-                    }
-
-                    percentiles.add(per.value());
+                    valuesPerAggKey.computeIfAbsent(new PercentileKey(per), v -> new LinkedHashSet<>())
+                        .add(per.value());
                 }
             });
 
-            Map<Expression, PercentileRanks> ranksPerField = new LinkedHashMap<>();
-            // create a PercentileRanks agg for each field (and its associated values)
-            percentPerField.forEach((k, v) -> {
-                ranksPerField.put(k, new PercentileRanks(v.iterator().next().source(), k, new ArrayList<>(v)));
-            });
+            // create a PercentileRank agg for each agg key
+            Map<PercentileKey, PercentileRanks> ranksPerAggKey = new LinkedHashMap<>();
+            valuesPerAggKey.forEach((aggKey, values) -> ranksPerAggKey.put(
+                aggKey,
+                new PercentileRanks(values.iterator().next().source(), aggKey.field(), new ArrayList<>(values), 
+                    aggKey.percentilesConfig())));
 
             return p.transformExpressionsUp(e -> {
                 if (e instanceof PercentileRank) {
                     PercentileRank per = (PercentileRank) e;
-                    PercentileRanks ranks = ranksPerField.get(per.field());
+                    PercentileRanks ranks = ranksPerAggKey.get(new PercentileKey(per));
                     return new InnerAggregate(per, ranks);
                 }
 
@@ -1107,22 +1130,21 @@ public class Optimizer extends RuleExecutor<LogicalPlan> {
     static class PruneFilters extends org.elasticsearch.xpack.ql.optimizer.OptimizerRules.PruneFilters {
 
         @Override
-        protected LogicalPlan nonMatchingFilter(Filter filter) {
-            return new LocalRelation(filter.source(), new EmptyExecutable(filter.output()));
+        protected LogicalPlan skipPlan(Filter filter) {
+            return Optimizer.skipPlan(filter);
         }
     }
 
+    static class SkipQueryOnLimitZero extends org.elasticsearch.xpack.ql.optimizer.OptimizerRules.SkipQueryOnLimitZero {
 
-    static class SkipQueryOnLimitZero extends OptimizerRule<Limit> {
         @Override
-        protected LogicalPlan rule(Limit limit) {
-            if (limit.limit() instanceof Literal) {
-                if (Integer.valueOf(0).equals((limit.limit().fold()))) {
-                    return new LocalRelation(limit.source(), new EmptyExecutable(limit.output()));
-                }
-            }
-            return limit;
+        protected LogicalPlan skipPlan(Limit limit) {
+            return Optimizer.skipPlan(limit);
         }
+    }
+
+    private static LogicalPlan skipPlan(UnaryPlan plan) {
+        return new LocalRelation(plan.source(), new EmptyExecutable(plan.output()));
     }
 
     static class SkipQueryIfFoldingProjection extends OptimizerRule<LogicalPlan> {

@@ -18,6 +18,7 @@
  */
 package org.elasticsearch.repositories.blobstore;
 
+import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -25,6 +26,7 @@ import org.apache.http.HttpStatus;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
+import org.apache.lucene.util.LuceneTestCase;
 import org.elasticsearch.action.admin.indices.forcemerge.ForceMergeResponse;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.common.Strings;
@@ -47,6 +49,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -65,6 +68,8 @@ import static org.hamcrest.Matchers.hasSize;
  * Integration tests for {@link BlobStoreRepository} implementations rely on mock APIs that emulate cloud-based services.
  */
 @SuppressForbidden(reason = "this test uses a HttpServer to emulate a cloud-based storage service")
+// The tests in here do a lot of state updates and other writes to disk and are slowed down too much by WindowsFS
+@LuceneTestCase.SuppressFileSystems(value = {"WindowsFS", "ExtrasFS"})
 public abstract class ESMockAPIBasedRepositoryIntegTestCase extends ESBlobStoreRepositoryIntegTestCase {
 
     /**
@@ -173,7 +178,7 @@ public abstract class ESMockAPIBasedRepositoryIntegTestCase extends ESBlobStoreR
             .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0)
             .build());
 
-        final long nbDocs = randomLongBetween(100, 1000);
+        final long nbDocs = randomLongBetween(10_000L, 20_000L);
         try (BackgroundIndexer indexer = new BackgroundIndexer(index, "_doc", client(), (int) nbDocs)) {
             waitForDocs(nbDocs, indexer);
         }
@@ -211,32 +216,25 @@ public abstract class ESMockAPIBasedRepositoryIntegTestCase extends ESBlobStoreR
 
         Map<String, Long> sdkRequestCounts = repositoryStats.requestCounts;
 
-        for (String requestType : List.of("GET", "LIST")) {
-            assertSDKCallsMatchMockCalls(sdkRequestCounts, requestType);
-        }
+        final Map<String, Long> mockCalls = getMockRequestCounts();
+
+        String assertionErrorMsg = String.format("SDK sent [%s] calls and handler measured [%s] calls",
+            sdkRequestCounts,
+            mockCalls);
+
+        assertEquals(assertionErrorMsg, mockCalls, sdkRequestCounts);
     }
 
-    private void assertSDKCallsMatchMockCalls(Map<String, Long> sdkRequestCount, String requestTye) {
-        final long sdkCalls = sdkRequestCount.getOrDefault(requestTye, 0L);
-        final long mockCalls = handlers.values().stream()
-            .mapToLong(h -> {
-                while (h instanceof DelegatingHttpHandler) {
-                    if (h instanceof HttpStatsCollectorHandler) {
-                        return ((HttpStatsCollectorHandler) h).getCount(requestTye);
-                    }
-                    h = ((DelegatingHttpHandler) h).getDelegate();
+    private Map<String, Long> getMockRequestCounts() {
+        for (HttpHandler h : handlers.values()) {
+            while (h instanceof DelegatingHttpHandler) {
+                if (h instanceof HttpStatsCollectorHandler) {
+                    return ((HttpStatsCollectorHandler) h).getOperationsCount();
                 }
-
-                return 0L;
-            }).sum();
-
-        String assertionErrorMsg = String.format("SDK sent %d [%s] calls and handler measured %d [%s] calls",
-            sdkCalls,
-            requestTye,
-            mockCalls,
-            requestTye);
-
-        assertEquals(assertionErrorMsg, mockCalls, sdkCalls);
+                h = ((DelegatingHttpHandler) h).getDelegate();
+            }
+        }
+        return Collections.emptyMap();
     }
 
     protected static String httpServerUrl() {
@@ -328,7 +326,7 @@ public abstract class ESMockAPIBasedRepositoryIntegTestCase extends ESBlobStoreR
     /**
      * HTTP handler that allows collect request stats per request type.
      *
-     * Implementors should keep track of the desired requests on {@link #maybeTrack(String)}.
+     * Implementors should keep track of the desired requests on {@link #maybeTrack(String, Headers)}.
      */
     @SuppressForbidden(reason = "this test uses a HttpServer to emulate a cloud-based storage service")
     public abstract static class HttpStatsCollectorHandler implements DelegatingHttpHandler {
@@ -346,8 +344,8 @@ public abstract class ESMockAPIBasedRepositoryIntegTestCase extends ESBlobStoreR
             return delegate;
         }
 
-        synchronized long getCount(final String requestType) {
-            return operationCount.getOrDefault(requestType, 0L);
+        synchronized Map<String, Long> getOperationsCount() {
+            return Map.copyOf(operationCount);
         }
 
         protected synchronized void trackRequest(final String requestType) {
@@ -358,7 +356,7 @@ public abstract class ESMockAPIBasedRepositoryIntegTestCase extends ESBlobStoreR
         public void handle(HttpExchange exchange) throws IOException {
             final String request = exchange.getRequestMethod() + " " + exchange.getRequestURI().toString();
 
-            maybeTrack(request);
+            maybeTrack(request, exchange.getRequestHeaders());
 
             delegate.handle(exchange);
         }
@@ -370,8 +368,9 @@ public abstract class ESMockAPIBasedRepositoryIntegTestCase extends ESBlobStoreR
          * Request = Method SP Request-URI
          *
          * @param request the request to be tracked if it matches the criteria
+         * @param requestHeaders the http request headers
          */
-        protected abstract void maybeTrack(String request);
+        protected abstract void maybeTrack(String request, Headers requestHeaders);
     }
 
     /**

@@ -31,6 +31,7 @@ import org.elasticsearch.search.aggregations.InternalAggregation;
 import org.elasticsearch.search.aggregations.LeafBucketCollector;
 import org.elasticsearch.search.aggregations.LeafBucketCollectorBase;
 import org.elasticsearch.search.aggregations.support.ValuesSource;
+import org.elasticsearch.search.aggregations.support.ValuesSourceConfig;
 import org.elasticsearch.search.internal.SearchContext;
 
 import java.io.IOException;
@@ -45,11 +46,12 @@ class AvgAggregator extends NumericMetricsAggregator.SingleValue {
     DoubleArray compensations;
     DocValueFormat format;
 
-    AvgAggregator(String name, ValuesSource.Numeric valuesSource, DocValueFormat formatter, SearchContext context,
-            Aggregator parent, Map<String, Object> metadata) throws IOException {
+    AvgAggregator(String name, ValuesSourceConfig valuesSourceConfig, SearchContext context,
+                  Aggregator parent, Map<String, Object> metadata) throws IOException {
         super(name, context, parent, metadata);
-        this.valuesSource = valuesSource;
-        this.format = formatter;
+        // TODO Stop expecting nulls here
+        this.valuesSource = valuesSourceConfig.hasValues() ? (ValuesSource.Numeric) valuesSourceConfig.getValuesSource() : null;
+        this.format = valuesSourceConfig.format();
         if (valuesSource != null) {
             final BigArrays bigArrays = context.bigArrays();
             counts = bigArrays.newLongArray(1, true);
@@ -69,16 +71,15 @@ class AvgAggregator extends NumericMetricsAggregator.SingleValue {
         if (valuesSource == null) {
             return LeafBucketCollector.NO_OP_COLLECTOR;
         }
-        final BigArrays bigArrays = context.bigArrays();
         final SortedNumericDoubleValues values = valuesSource.doubleValues(ctx);
         final CompensatedSum kahanSummation = new CompensatedSum(0, 0);
 
         return new LeafBucketCollectorBase(sub, values) {
             @Override
             public void collect(int doc, long bucket) throws IOException {
-                counts = bigArrays.grow(counts, bucket + 1);
-                sums = bigArrays.grow(sums, bucket + 1);
-                compensations = bigArrays.grow(compensations, bucket + 1);
+                counts = bigArrays().grow(counts, bucket + 1);
+                sums = bigArrays().grow(sums, bucket + 1);
+                compensations = bigArrays().grow(compensations, bucket + 1);
 
                 if (values.advanceExact(doc)) {
                     final int valueCount = values.docValueCount();

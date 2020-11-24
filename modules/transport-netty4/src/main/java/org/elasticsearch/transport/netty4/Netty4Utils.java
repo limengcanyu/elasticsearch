@@ -38,7 +38,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class Netty4Utils {
 
-    private static AtomicBoolean isAvailableProcessorsSet = new AtomicBoolean();
+    private static final AtomicBoolean isAvailableProcessorsSet = new AtomicBoolean();
 
     /**
      * Set the number of available processors that Netty uses for sizing various resources (e.g., thread pools).
@@ -109,6 +109,8 @@ public class Netty4Utils {
         final int readableBytes = buffer.readableBytes();
         if (readableBytes == 0) {
             return BytesArray.EMPTY;
+        } else if (buffer.hasArray()) {
+            return new BytesArray(buffer.array(), buffer.arrayOffset() + buffer.readerIndex(), readableBytes);
         } else {
             final ByteBuffer[] byteBuffers = buffer.nioBuffers();
             return BytesReference.fromByteBuffers(byteBuffers);

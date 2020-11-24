@@ -12,6 +12,7 @@ import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.ClusterStateObserver;
 import org.elasticsearch.cluster.ClusterStateUpdateTask;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
+import org.elasticsearch.cluster.metadata.Metadata;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.unit.TimeValue;
@@ -118,7 +119,7 @@ class IndexLifecycleRunner {
      * Run the current step, only if it is an asynchronous wait step. These
      * wait criteria are checked periodically from the ILM scheduler
      */
-    void runPeriodicStep(String policy, IndexMetadata indexMetadata) {
+    void runPeriodicStep(String policy, Metadata metadata, IndexMetadata indexMetadata) {
         String index = indexMetadata.getIndex().getName();
         LifecycleExecutionState lifecycleState = LifecycleExecutionState.fromIndexMetadata(indexMetadata);
         final Step currentStep;
@@ -170,7 +171,7 @@ class IndexLifecycleRunner {
             }
         } else if (currentStep instanceof AsyncWaitStep) {
             logger.debug("[{}] running periodic policy with current-step [{}]", index, currentStep.getKey());
-            ((AsyncWaitStep) currentStep).evaluateCondition(indexMetadata, new AsyncWaitStep.Listener() {
+            ((AsyncWaitStep) currentStep).evaluateCondition(metadata, indexMetadata.getIndex(), new AsyncWaitStep.Listener() {
 
                 @Override
                 public void onResponse(boolean conditionMet, ToXContentObject stepInfo) {
@@ -210,20 +211,15 @@ class IndexLifecycleRunner {
 
         if (lifecycleState.isAutoRetryableError() != null && lifecycleState.isAutoRetryableError()) {
             int currentRetryAttempt = lifecycleState.getFailedStepRetryCount() == null ? 1 : 1 + lifecycleState.getFailedStepRetryCount();
-            logger.info("policy [{}] for index [{}] on an error step due to a transitive error, moving back to the failed " +
+            logger.info("policy [{}] for index [{}] on an error step due to a transient error, moving back to the failed " +
                 "step [{}] for execution. retry attempt [{}]", policy, index, lifecycleState.getFailedStep(), currentRetryAttempt);
+            // we can afford to drop these requests if they timeout as on the next {@link
+            // IndexLifecycleRunner#runPeriodicStep} run the policy will still be in the ERROR step, as we haven't been able
+            // to move it back into the failed step, so we'll try again
             clusterService.submitStateUpdateTask(
                 String.format(Locale.ROOT, "ilm-retry-failed-step {policy [%s], index [%s], failedStep [%s]}", policy, index,
-                    failedStep.getKey()),
-                new ClusterStateUpdateTask() {
-
-                    @Override
-                    public TimeValue timeout() {
-                        // we can afford to drop these requests if they timeout as on the next {@link
-                        // IndexLifecycleRunner#runPeriodicStep} run the policy will still be in the ERROR step, as we haven't been able
-                        // to move it back into the failed step, so we'll try again
-                        return LifecycleSettings.LIFECYCLE_STEP_MASTER_TIMEOUT_SETTING.get(clusterService.state().metadata().settings());
-                    }
+                    failedStep.getKey()), new ClusterStateUpdateTask(
+                            LifecycleSettings.LIFECYCLE_STEP_MASTER_TIMEOUT_SETTING.get(clusterService.state().metadata().settings())) {
 
                     @Override
                     public ClusterState execute(ClusterState currentState) {
